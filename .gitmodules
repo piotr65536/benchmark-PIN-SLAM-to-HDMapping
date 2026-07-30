@@ -1,0 +1,3 @@
+[submodule "src/PIN_SLAM"]
+	path = src/PIN_SLAM
+	url = https://github.com/PRBonn/PIN_SLAM.git
