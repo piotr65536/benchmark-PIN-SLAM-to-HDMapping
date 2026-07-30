@@ -63,7 +63,9 @@ DATASET_BASE=$(basename "$DATASET_HOST_PATH")
 if [[ "$CPU_ONLY" == "1" ]]; then
   GPU_ARGS=""
 elif docker info 2>/dev/null | grep -q 'Runtimes:.*nvidia'; then
-  GPU_ARGS="--runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=compute,utility"
+  # capabilities=all also injects the NVIDIA GL libraries, so the o3d viewer
+  # can render hardware-accelerated inside the container.
+  GPU_ARGS="--runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all"
 elif docker run --rm --gpus all ubuntu:22.04 true >/dev/null 2>&1; then
   GPU_ARGS="--gpus all"
 else
@@ -72,11 +74,15 @@ else
   echo "WARNING: no working NVIDIA docker runtime detected — running on CPU (very slow)."
 fi
 
-# Viewer needs X11.
-VIS_ARGS=""
+# Viewer needs X11 (same recipe as the RViz-based benchmarks: host network +
+# X socket mount + xhost; additionally pass the X authority file if present).
+XAUTH_ARGS=""
 if [[ "$VIS" == "1" && -n "$DISPLAY" ]]; then
   VIS_FLAG="-v"
   xhost +local:docker >/dev/null 2>&1 || true
+  if [[ -n "$XAUTHORITY" && -f "$XAUTHORITY" ]]; then
+    XAUTH_ARGS="-e XAUTHORITY=/tmp/.host_xauth -v $XAUTHORITY:/tmp/.host_xauth:ro"
+  fi
 else
   VIS_FLAG=""
 fi
@@ -89,7 +95,9 @@ echo "Viewer          : ${VIS_FLAG:-off}"
 echo "CPU only        : $CPU_ONLY"
 
 docker run -it --rm \
+  --network host \
   $GPU_ARGS \
+  $XAUTH_ARGS \
   -e DISPLAY="$DISPLAY" \
   -e XDG_RUNTIME_DIR=/tmp/xdg \
   -v /tmp/.X11-unix:/tmp/.X11-unix \
