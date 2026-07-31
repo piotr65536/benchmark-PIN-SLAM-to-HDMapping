@@ -54,8 +54,10 @@ Environment variables:
 | `CONFIG` | `config/lidar_slam/run.yaml` | PIN-SLAM config file (inside the PIN_SLAM repo) |
 | `TOPIC` | `/livox/pointcloud` | point cloud topic in the bag |
 | `VIS` | `1` | show PIN-SLAM's live 3D viewer (auto-off without `DISPLAY`) |
+| `VIEWER_HOLD` | `30` | seconds the viewer stays open after SLAM finishes, then auto-close + convert |
 | `CPU_ONLY` | `0` | force CPU (very slow) |
 | `POINT_SKIP` | `1` | converter keeps every Nth point |
+| `CONVERT_RUN_DIR` | – | existing `pin_experiments` run dir (container path): skip SLAM, only convert |
 
 **What happens:**
 

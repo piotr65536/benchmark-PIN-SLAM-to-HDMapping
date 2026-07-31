@@ -138,6 +138,16 @@ def main():
     poses = load_tum_poses(args.run_dir)
     pose_ts = np.array([p[0] for p in poses], dtype=np.int64)
 
+    # PIN-SLAM's rosbag dataloader does not propagate sensor timestamps, so the
+    # TUM files may contain synthetic relative stamps (frame_index * 0.1 s). In
+    # that case match bag frames to poses BY INDEX (PIN-SLAM emits exactly one
+    # pose per processed frame, in order) and take real sensor timestamps from
+    # the bag message headers. 1e15 ns ~ Jan 1970 — any real epoch is far above.
+    index_mode = pose_ts[0] < int(1e15)
+    if index_mode:
+        print("Pose timestamps are RELATIVE (synthetic) — matching frames to poses by index, "
+              "using bag header stamps as output timestamps.")
+
     os.makedirs(args.out, exist_ok=True)
 
     # ── Rebuild world-frame cloud, chunked ───────────────────────────────────
@@ -159,19 +169,30 @@ def main():
         cur_xyz, cur_int, cur_ts = [], [], []
         cur_count = 0
 
+    # For chunk-trajectory indexing (and the corrected TUM export) collect the
+    # matched (bag_timestamp, pose) pairs — in index mode the file's own
+    # timestamps are meaningless.
+    matched_poses = []
+
     print("Rebuilding world-frame cloud from bag + PIN-SLAM poses...")
     for stamp_ns, msg in read_bag_clouds(args.bag, args.topic):
         total_frames += 1
-        idx = np.searchsorted(pose_ts, stamp_ns)
-        best, best_dt = None, None
-        for j in (idx - 1, idx):
-            if 0 <= j < len(pose_ts):
-                dt = abs(int(pose_ts[j]) - stamp_ns)
-                if best_dt is None or dt < best_dt:
-                    best, best_dt = j, dt
-        if best is None or best_dt > POSE_MATCH_TOLERANCE_NS:
-            continue
+        if index_mode:
+            best = total_frames - 1 if total_frames - 1 < len(poses) else None
+            if best is None:
+                continue
+        else:
+            idx = np.searchsorted(pose_ts, stamp_ns)
+            best, best_dt = None, None
+            for j in (idx - 1, idx):
+                if 0 <= j < len(pose_ts):
+                    dt = abs(int(pose_ts[j]) - stamp_ns)
+                    if best_dt is None or dt < best_dt:
+                        best, best_dt = j, dt
+            if best is None or best_dt > POSE_MATCH_TOLERANCE_NS:
+                continue
         matched_frames += 1
+        matched_poses.append((stamp_ns, poses[best][1], poses[best][2]))
 
         xyz, intensity = parse_pointcloud2(msg)
         if xyz is None:
@@ -197,13 +218,18 @@ def main():
     flush_chunk()  # keep ANY non-empty trailing chunk (do not drop small tails)
 
     print(f"Matched {matched_frames}/{total_frames} frames to poses; {len(chunks)} chunks.")
+    if index_mode and len(poses) != total_frames:
+        print(f"WARNING: pose count ({len(poses)}) != frame count ({total_frames}) in index mode — "
+              "check that the SLAM run processed the same bag/topic.")
     if not chunks:
         print("ERROR: no frames matched any pose — check the topic and pose timestamps.")
         sys.exit(1)
 
     # ── Index trajectory into chunks (first matching chunk, like the C++) ────
+    # Uses the matched (bag_timestamp, pose) pairs so trajectory timestamps are
+    # always sensor time, regardless of what the TUM file contained.
     chunks_traj = [[] for _ in chunks]
-    for ts_ns, T, quat in poses:
+    for ts_ns, T, quat in matched_poses:
         for j, ch in enumerate(chunks):
             if ch["ts_min"] <= ts_ns <= ch["ts_max"]:
                 chunks_traj[j].append((ts_ns, T, quat))
@@ -280,6 +306,17 @@ def main():
     with open(session_path, "w") as f:
         json.dump(session, f, indent=2, sort_keys=True)
     print(f"saving file: '{session_path}'")
+
+    # ── Corrected TUM trajectory (absolute sensor time) — for evo etc. ───────
+    # The raw PIN-SLAM *_tum.txt may carry synthetic relative stamps; this one
+    # is always stamped with the bag's sensor time.
+    abs_tum = os.path.join(out_abs, "poses_tum_abs.txt")
+    with open(abs_tum, "w") as f:
+        for ts_ns, T, (qw, qx, qy, qz) in matched_poses:
+            t = T[:3, 3]
+            f.write(f"{ts_ns / 1e9:.9f} {t[0]:.6f} {t[1]:.6f} {t[2]:.6f} "
+                    f"{qx:.6f} {qy:.6f} {qz:.6f} {qw:.6f}\n")
+    print(f"saved {abs_tum}")
     print("=== DONE ===")
 
 

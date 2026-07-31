@@ -12,11 +12,14 @@
 #   ./docker_session_run-pin-slam.sh <input.bag | ros2_bag_dir> <output_dir>
 #
 # Environment variables:
-#   CONFIG     - PIN-SLAM config inside the repo (default: config/lidar_slam/run.yaml)
-#   TOPIC      - point cloud topic in the bag (default: /livox/pointcloud)
-#   VIS        - 1 = show PIN-SLAM 3D viewer (default: 1; auto-off without DISPLAY)
-#   CPU_ONLY   - 1 = run on CPU (very slow; default 0 = CUDA GPU)
-#   POINT_SKIP - converter keeps every Nth point (default 1 = all)
+#   CONFIG          - PIN-SLAM config inside the repo (default: config/lidar_slam/run.yaml)
+#   TOPIC           - point cloud topic in the bag (default: /livox/pointcloud)
+#   VIS             - 1 = show PIN-SLAM 3D viewer (default: 1; auto-off without DISPLAY)
+#   VIEWER_HOLD     - seconds to keep the viewer open after SLAM finishes (default 30)
+#   CPU_ONLY        - 1 = run on CPU (very slow; default 0 = CUDA GPU)
+#   POINT_SKIP      - converter keeps every Nth point (default 1 = all)
+#   CONVERT_RUN_DIR - container path of an existing pin_experiments run dir
+#                     (e.g. /output/pin_experiments/<run>): skip SLAM, only convert
 
 set -e
 
@@ -26,8 +29,10 @@ OUTPUT_NAME='output_hdmapping-PIN-SLAM'
 CONFIG="${CONFIG:-config/lidar_slam/run.yaml}"
 TOPIC="${TOPIC:-/livox/pointcloud}"
 VIS="${VIS:-1}"
+VIEWER_HOLD="${VIEWER_HOLD:-30}"
 CPU_ONLY="${CPU_ONLY:-0}"
 POINT_SKIP="${POINT_SKIP:-1}"
+CONVERT_RUN_DIR="${CONVERT_RUN_DIR:-}"
 
 if [[ $# -lt 2 ]]; then
   if command -v zenity >/dev/null 2>&1; then
@@ -104,20 +109,63 @@ docker run -it --rm \
   -v "$DATASET_DIR":/data \
   -v "$OUTPUT_HOST_DIR":/output \
   "$IMAGE_NAME" bash -c "
-set -e
 cd /pin_ws/PIN_SLAM
 
 CPU_FLAG=''
 if [[ '$CPU_ONLY' == '1' ]]; then CPU_FLAG='-c'; fi
 
-echo '[pin-slam] running SLAM (this processes the whole bag offline)...'
-python3 pin_slam.py '$CONFIG' rosbag '$TOPIC' -d \
-    -i '/data/$DATASET_BASE' \
-    -o /tmp/pin_experiments \
-    \$CPU_FLAG $VIS_FLAG
+# Experiments are stored on the HOST (mounted /output) so a finished SLAM run
+# survives crashes / Ctrl+C / viewer trouble and can be re-converted later.
+EXP_ROOT=/output/pin_experiments
 
-RUN_DIR=\$(ls -td /tmp/pin_experiments/*/ | head -1)
-echo \"[pin-slam] done. Run dir: \$RUN_DIR\"
+RUN_DIR='$CONVERT_RUN_DIR'
+if [[ -z \"\$RUN_DIR\" ]]; then
+    # Marker so the watchdog only ever looks at the run dir CREATED BY THIS
+    # INVOCATION — earlier persisted runs in \$EXP_ROOT also contain pose files
+    # and must not trigger the teardown.
+    mkdir -p \"\$EXP_ROOT\"
+    START_MARKER=/tmp/.pin_start_marker
+    touch \"\$START_MARKER\"
+    sleep 1
+
+    echo '[pin-slam] running SLAM (this processes the whole bag offline)...'
+    python3 pin_slam.py '$CONFIG' rosbag '$TOPIC' -d \
+        -i '/data/$DATASET_BASE' \
+        -o \"\$EXP_ROOT\" \
+        \$CPU_FLAG $VIS_FLAG &
+    SLAM_PID=\$!
+
+    # Watchdog: PIN-SLAM writes its result files BEFORE entering the final
+    # viewer loop, and with the viewer on it never exits by itself (and can
+    # hang on shutdown). Once the pose file appears in THIS run's dir, hold the
+    # viewer open for VIEWER_HOLD seconds, then close it.
+    RUN_DIR=''
+    while kill -0 \$SLAM_PID 2>/dev/null; do
+        sleep 5
+        if [[ -z \"\$RUN_DIR\" ]]; then
+            RUN_DIR=\$(find \"\$EXP_ROOT\" -maxdepth 1 -mindepth 1 -type d -newer \"\$START_MARKER\" | head -1)
+        fi
+        if [[ -n \"\$RUN_DIR\" && -f \"\$RUN_DIR/odom_poses_tum.txt\" ]]; then
+            echo \"[pin-slam] results written. Closing viewer in ${VIEWER_HOLD}s...\"
+            sleep '$VIEWER_HOLD'
+            kill -TERM \$SLAM_PID 2>/dev/null || true
+            sleep 5
+            kill -KILL \$SLAM_PID 2>/dev/null || true
+            break
+        fi
+    done
+    wait \$SLAM_PID 2>/dev/null || true
+
+    if [[ -z \"\$RUN_DIR\" ]]; then
+        RUN_DIR=\$(find \"\$EXP_ROOT\" -maxdepth 1 -mindepth 1 -type d -newer \"\$START_MARKER\" | head -1)
+    fi
+fi
+
+if [[ -z \"\$RUN_DIR\" || ! -f \"\$RUN_DIR/odom_poses_tum.txt\" ]]; then
+    echo '[pin-slam] ERROR: no result poses found — SLAM did not finish.'
+    exit 1
+fi
+echo \"[pin-slam] using run dir: \$RUN_DIR\"
 
 echo '[converter] building HDMapping session...'
 python3 /pin_ws/converter/pinslam_to_hdmapping.py \
@@ -129,7 +177,7 @@ python3 /pin_ws/converter/pinslam_to_hdmapping.py \
 
 # Keep the raw PIN-SLAM pose files next to the session (useful for evo APE).
 cp -v \"\$RUN_DIR\"/*_tum.txt '/output/$OUTPUT_NAME/' 2>/dev/null || true
-chmod -R a+rw '/output/$OUTPUT_NAME'
+chmod -R a+rw '/output/$OUTPUT_NAME' \"\$EXP_ROOT\" 2>/dev/null || true
 "
 
 echo "=== DONE === Results in: $OUTPUT_HOST_DIR/$OUTPUT_NAME"
