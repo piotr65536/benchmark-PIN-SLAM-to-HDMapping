@@ -1,3 +1,11 @@
+## Hint
+
+Please change branch to [Bunker-DVI-Dataset-reg-1](https://github.com/MapsHD/benchmark-PIN-SLAM-to-HDMapping/tree/Bunker-DVI-Dataset-reg-1) for quick experiment.
+
+## Example Dataset:
+
+Download the dataset from [Bunker DVI Dataset](https://charleshamesse.github.io/bunker-dvi-dataset/)
+
 # benchmark-PIN-SLAM-to-HDMapping
 
 Runs the [PIN-SLAM](https://github.com/PRBonn/PIN_SLAM) LiDAR SLAM algorithm on
